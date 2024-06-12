@@ -36,10 +36,12 @@
   position: relative;
   z-index: 1;
   overflow: hidden;
+  box-shadow: 0 0 16px #00000014;
 }
 
-.netless-window-manager-wrapper {
-  box-shadow: 0 0 16px #00000014;
+.netless-window-manager-main-view {
+  width: 100%;
+  height: 100%;
 }
 
 .netless-window-manager-frameless .telebox-box-main {

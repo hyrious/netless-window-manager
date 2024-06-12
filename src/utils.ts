@@ -1,3 +1,5 @@
+import type { InvisiblePlugin } from 'white-web-sdk'
+
 export const debounced = <T extends (...args: any[]) => void>(fn: T, timeout: number): T => {
   let timer = 0, lastTime = 0
 
@@ -39,5 +41,19 @@ export const createLogger = (room: unknown): Logger => {
     return (...args) => (room as any).logger.info(...args)
   } else {
     return (...args) => console.info(...args)
+  }
+}
+
+// TODO: Remove this function for the one from `white-web-sdk`.
+const isArray = (a: any): a is any[] => {
+  return a.__proxy && Array.isArray(a.__proxy.displayerTarget())
+}
+
+// Arrays must be replaced, since the SDK does not support partially update an array.
+export const deepAssignAttributes = (w: InvisiblePlugin<{}, {}>, a: {}, b: {}, p: string[] = []) => {
+  if (typeof a !== typeof b || (typeof a !== 'object' && a !== b) || Array.isArray(b) || isArray(a)) {
+    w.updateAttributes(p, b)
+  } else for (let k of Object.keys(b)) {
+    deepAssignAttributes(w, a[k], b[k], [...p, k])
   }
 }

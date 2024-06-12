@@ -1,7 +1,7 @@
 import { disposableStore } from '@wopjs/disposable'
 import { derive, flatten, type ReadonlyVal } from 'value-enhancer'
 import { reactiveMap } from 'value-enhancer/collections'
-import { InvisiblePlugin, RoomPhase, isPlayer as isPlayer_, isRoom as isRoom_, type Displayer, type InvisiblePluginClass, type Player, type Room, type RoomCallbacks, type View, type ViewCallbacks } from 'white-web-sdk'
+import { InvisiblePlugin, RoomPhase, isPlayer as isPlayer_, isRoom as isRoom_, type Displayer, type InvisiblePluginClass, type Player, type PlayerCallbacks, type Room, type RoomCallbacks, type View, type ViewCallbacks } from 'white-web-sdk'
 
 export const isRoom = (room: Displayer): room is Room => isRoom_(room)
 
@@ -34,6 +34,11 @@ export function listenRoom<K extends keyof RoomCallbacks>(room: Room, event: K, 
   //                  However, `const fn = () =>` yields less minified code.
   room.callbacks.on(event, callback)
   return () => room.callbacks.off(event, callback)
+}
+
+export function listenPlayer<K extends keyof PlayerCallbacks>(player: Player, event: K, callback: PlayerCallbacks[K]) {
+  player.callbacks.on(event, callback)
+  return () => player.callbacks.off(event, callback)
 }
 
 /// ```js

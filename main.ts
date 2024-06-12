@@ -19,9 +19,14 @@ let room = await sdk.joinRoom({
   roomToken: import.meta.env.VITE_ROOM_TOKEN,
   invisiblePlugins: [p.class],
   useMultiViews: true,
+  disableNewPencil: false,
 })
 
-let manager = createWindowManager(p.initialize(room))
+let manager = createWindowManager({
+  room,
+  plugin$: p.initialize(room),
+  prefersColorScheme: 'light',
+})
 
 Object.assign(globalThis, { SDK, sdk, room, manager })
 
@@ -31,7 +36,7 @@ function debug() {
   let el = document.querySelector('#debug')!
 
   setInterval(() => {
-    el.textContent = JSON.stringify(manager.attributes, null, 2)
+    el.textContent = JSON.stringify(manager.pageState, null, 2) + ' ' + JSON.stringify(manager.attributes, null, 2)
   }, 1000)
 }
 
