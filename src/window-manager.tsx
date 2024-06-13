@@ -1,11 +1,13 @@
-import { TeleBoxManager, type TeleBoxColorScheme } from '@netless/telebox-insider'
-import { disposableMap, disposableStore } from "@wopjs/disposable"
-import { h } from '@wopjs/dom'
 import Emittery from 'emittery'
+import { h } from '@wopjs/dom'
+import { disposableMap, disposableStore } from "@wopjs/disposable"
 import { combine, from, val, type ReadonlyVal } from "value-enhancer"
-import { AnimationMode, reaction, type Camera, type CameraState, type Displayer, type InvisiblePlugin, type Player, type Rectangle, type Room, type SceneDefinition, type Size, type View } from "white-web-sdk"
+import { TeleBoxManager, type TeleBoxColorScheme, type TeleBoxState } from '@netless/telebox-insider'
+import { AnimationMode, reaction, type Camera, type CameraState, type Displayer, type Event, type InvisiblePlugin, type MagixEventListenerOptions, type Player, type Rectangle, type Room, type SceneDefinition, type Size, type View } from "white-web-sdk"
 import { isPlayer, isRoom, isRoomWritable, listenPlayer, listenRoom, listenView } from "./invisible-plugin"
-import { compareVersion, createLogger, debounced, deepAssignAttributes, supportsAspectRatio, type Logger } from './utils'
+import { compareVersion, createLogger, debounced, mergeAttributes, nextAppId, supportsAspectRatio, type Logger } from './utils'
+import { kStorage } from './synced-store'
+import { App, type AppMeta } from './app'
 
 export interface WindowManagerOptions {
   /// The object returned by `joinRoom()` or `replayRoom()`.
@@ -27,16 +29,44 @@ export interface WindowManagerOptions {
   freedom?: boolean
 }
 
+export interface PageState {
+  context: string
+  index: number
+  length: number
+}
+
 export interface WindowManagerEventData {
+  boxStateChange: TeleBoxState
+  darkModeChange: boolean
+  prefersColorSchemeChange: TeleBoxColorScheme
   cameraStateChange: CameraState
+  pageStateChange: PageState
+  appSetupError: unknown
+}
+
+export interface AddAppOptions {
+  kind: string
+  /// Load this app from a remote script URL.
+  src?: string
+  /// See `src`, the global variable name to extract the app definition.
+  name?: string
+  /// Window title, default is `"{kind}-{randomId}"`.
+  title?: string
+  /// Initial app state.
+  state?: {}
 }
 
 export interface WindowManager {
 
-  /// Events.
-  readonly emitter: Emittery<WindowManagerEventData>
+  readonly version: string
 
-  /// Same as `options.room`.
+  /// Options.
+  readonly options: WindowManagerOptions
+
+  /// Events.
+  readonly events: Emittery<WindowManagerEventData>
+
+  /// Same as `this.room || this.player`.
   readonly displayer: Displayer
 
   /// Only available when `options.room` is returned by `joinRoom()`.
@@ -44,6 +74,9 @@ export interface WindowManager {
 
   /// Only available when `options.room` is returned by `replayRoom()`.
   readonly player: Player | undefined
+
+  /// Roughly equal to the whiteboard server's `Date.now()`.
+  readonly now: number
 
   /// If `true`, mutations like `moveCamera()` `addApp()` can be executed without error.
   /// Note that this only guarantees code run in sync. It is still possible for async codes to throw error.
@@ -82,7 +115,10 @@ export interface WindowManager {
 
   /// The main whiteboard's page (index, length). Default is `{ index: 0, length: 1 }`.
   /// This field is synced with all clients.
-  readonly pageState: { index: number, length: number }
+  readonly pageState: PageState
+
+  /// All window's state is synced, that is to say either all windows are minimized, or maximized, or normal.
+  readonly boxState: TeleBoxState
 
   /// Read synced states.
   readonly attributes: {}
@@ -105,6 +141,13 @@ export interface WindowManager {
   /// Update nested state. It can silently fail when room is not writable.
   /// To test if the user can operate, see `canOperate`.
   updateAttributes(keys: string | string[], value: unknown): void
+
+  /// Handy method to recursively call `updateAttributes()`.
+  /// It can silently fail when room is not writable.
+  mergeAttributes(partial: {}): void
+
+  /// Handy method to add listener on `attributes`.
+  reaction<T>(getter: () => T, callback: (value: T, prev?: T) => void, options?: { key?: string; fireImmediately?: boolean }): () => void
 
   /// Update `readonly`.
   setReadonly(readonly: boolean): void
@@ -154,13 +197,32 @@ export interface WindowManager {
 
   /// Remove current page or some page at index, or no effect when you have no write permission.
   removePage(index?: number): void
+
+  /// Send a broadcast message, or no effect when you have no write permission.
+  dispatchEvent(event: string, payload: unknown): void
+
+  /// Listen to broadcast messages, you will also receive messages sent by yourself.
+  /// Test `event.authorId === room.observerId` to know if the message is sent by self.
+  /// By default local events are received immediately. To ensure it comes from the backend,
+  /// pass `{ fireSelfEventAfterCommit: true }` as the third param.
+  addEventListener(event: string, callback: (event: Event) => void, options?: MagixEventListenerOptions): () => void
+
+  /// Send a random message to the server and resolves when it comes back.
+  /// This can make sure all local mutations have been uploaded to the server
+  /// and you can safely switch to reader mode or disconnect from the room without data loss.
+  nextFrame(): Promise<void>
+
+  /// Add a new windowed app to whiteboard. Returns the app's unique ID.
+  addApp(options: AddAppOptions): string | undefined
+
 }
 
 class WindowManagerImpl implements WindowManager {
   readonly namespace = 'netless-window-manager'
+  readonly version = __VERSION__
   readonly disposeMap = disposableMap()
   readonly dispose = disposableStore([this.disposeMap, this.options.plugin$])
-  readonly emitter = new Emittery<WindowManagerEventData>()
+  readonly events = new Emittery<WindowManagerEventData>()
   readonly log: Logger
 
   readonly dom: HTMLDivElement = <div class={this.c("playground")} />
@@ -175,8 +237,9 @@ class WindowManagerImpl implements WindowManager {
   readonly frame$ = this.dispose.add(val(true))
   readonly freedom$ = this.dispose.add(val(false))
 
-  readonly pageState$: ReadonlyVal<{ index: number, length: number }>
+  readonly pageState$: ReadonlyVal<PageState>
   readonly mainView: View
+  readonly apps = new Map<string, App>()
 
   constructor(readonly options: WindowManagerOptions) {
     const { room } = options
@@ -194,6 +257,7 @@ class WindowManagerImpl implements WindowManager {
 
     this.mainView = room.views.createView()
     this.mainView.divElement = this.mainViewDOM
+    this.dispose.add(() => room.views.forEach(view => view.release()))
 
     if (options.readonly != null) this.setReadonly(options.readonly)
     if (options.aspectRatio != null) this.setAspectRatio(options.aspectRatio)
@@ -215,12 +279,6 @@ class WindowManagerImpl implements WindowManager {
       return () => observer.disconnect()
     })
 
-    this.dispose.add(this.telebox._containerRect$.subscribe(rect => {
-      const { width, height } = rect, ratio = this.aspectRatio$.value
-      this.sizerDOM.classList.toggle(this.c('sizer-horizontal'), height * ratio > width)
-      this.emitter.emit('cameraStateChange', this.cameraState)
-    }))
-
     this.effectiveRect$ = this.dispose.add(from(
       () => {
         let { width, height } = this.telebox._containerRect$.value, ratio = this.aspectRatio$.value
@@ -238,20 +296,27 @@ class WindowManagerImpl implements WindowManager {
       { equal: (a, b) => a.width === b.width && a.height === b.height }
     ))
 
+    this.dispose.add(this.telebox._containerRect$.subscribe(rect => {
+      const { width, height } = rect, ratio = this.aspectRatio$.value
+      this.sizerDOM.classList.toggle(this.c('sizer-horizontal'), height * ratio > width)
+      this.events.emit('cameraStateChange', this.cameraState)
+    }))
+
     this.pageState$ = this.dispose.add(from(
-      () => ({
-        index: this.options.room.state.sceneState.index,
-        length: this.options.room.state.sceneState.scenes.length
-      }),
+      () => {
+        const { contextPath, index, scenes } = this.displayer.state.sceneState
+        return { context: contextPath, index, length: scenes.length }
+      },
       notify => {
         if (this.room) return listenRoom(this.room, 'onRoomStateChanged', s => { if (s.sceneState) notify() })
         if (this.player) return listenPlayer(this.player, 'onPlayerStateChanged', s => { if (s.sceneState) notify() })
       },
-      { eager: true }
+      { eager: true, equal: (a, b) => a.context === b.context && a.index === b.index && a.length === b.length }
     ))
 
-    this.dispose.add(this.pageState$.subscribe(() => {
-      this.mainView.focusScenePath = this.options.room.state.sceneState.scenePath
+    this.dispose.add(this.pageState$.subscribe((pageState) => {
+      this.mainView.focusScenePath = this.displayer.state.sceneState.scenePath
+      this.events.emit('pageStateChange', pageState)
     }))
 
     if (supportsAspectRatio()) {
@@ -273,7 +338,7 @@ class WindowManagerImpl implements WindowManager {
     this.dispose.add(listenView(room, this.mainView, 'onCameraUpdatedByDevice', this.syncCameraToRemote))
 
     this.dispose.add(listenView(room, this.mainView, 'onCameraUpdated', () => {
-      this.emitter.emit('cameraStateChange', this.cameraState)
+      this.events.emit('cameraStateChange', this.cameraState)
     }))
 
     this.dispose.add(this.reaction(() => this.attributes['camera'], (camera?: Camera & { id: number }) => {
@@ -292,6 +357,63 @@ class WindowManagerImpl implements WindowManager {
       if (freedom) return
       const camera = this.attributes['camera'] || { centerX: 0, centerY: 0, scale: 1 }
       this.mainView.moveCamera({ ...camera, scale: camera.scale * this.localScaleFactor })
+    }))
+
+    this.dispose.add(this.telebox._state$.reaction(() => {
+      this.events.emit('boxStateChange', this.boxState)
+    }))
+
+    this.dispose.add(this.telebox._darkMode$.reaction(() => {
+      this.events.emit('darkModeChange', this.darkMode)
+    }))
+
+    this.dispose.add(this.telebox._prefersColorScheme$.reaction(() => {
+      this.events.emit('prefersColorSchemeChange', this.prefersColorScheme)
+    }))
+
+    this.dispose.add(this.telebox._minimized$.reaction((minimized) => {
+      if (!minimized) setTimeout(() => {
+        const offset = 0.001 * (Math.random() > 0.5 ? 1 : -1)
+        this.telebox.boxes.forEach(box => box.resize(box.intrinsicWidth + offset, box.intrinsicHeight + offset, true))
+      })
+    }))
+
+    this.telebox.events.on("minimized", (minimized) => {
+      this.mergeAttributes({ minimized })
+      if (minimized) {
+        this.telebox.blurAll()
+      } else {
+        this.telebox.focusTopBox()
+      }
+    })
+
+    this.telebox.events.on("maximized", (maximized) => {
+      this.mergeAttributes({ maximized })
+    })
+
+    this.telebox.events.on("removed", (boxes) => {
+      const apps = {} as { [id: string]: undefined }
+      boxes.forEach(box => { apps[box.id] = void 0 })
+      this.mergeAttributes({ apps })
+    })
+
+    this.telebox.events.on("intrinsic_move", debounced((box) => {
+      const position = { x: box.intrinsicX, y: box.intrinsicY }
+      this.mergeAttributes({ apps: { [box.id]: { position } } })
+    }, 50))
+
+    this.telebox.events.on("intrinsic_resize", debounced((box) => {
+      const position = { width: box.intrinsicWidth, height: box.intrinsicHeight }
+      this.mergeAttributes({ apps: { [box.id]: { position } } })
+    }, 200))
+
+    this.telebox.events.on("z_index", (box) => {
+      const position = { z: box.zIndex }
+      this.mergeAttributes({ apps: { [box.id]: { position } } })
+    })
+
+    this.dispose.add(this.reaction(() => this.attributes['apps'], (apps?: { [id: string]: AppMeta }) => {
+      // TODO: refresh apps
     }))
   }
 
@@ -326,6 +448,12 @@ class WindowManagerImpl implements WindowManager {
     return isPlayer(this.options.room) ? this.options.room : undefined
   }
 
+  get now(): number {
+    return this.room?.calibrationTimestamp || (this.player ?
+      this.player.beginTimestamp + this.player.progressTime
+    : Date.now())
+  }
+
   get canOperate(): boolean {
     return !!this.writer()
   }
@@ -339,7 +467,7 @@ class WindowManagerImpl implements WindowManager {
   get attributes(): {} {
     try {
       // Throws error when the plugin was destroyed.
-      // It is ok to turn `{}` here in that case.
+      // It is ok to return `{}` here in that case.
       return this.options.plugin$.value.attributes
     } catch {
       return {}
@@ -354,11 +482,11 @@ class WindowManagerImpl implements WindowManager {
     this.writer()?.updateAttributes(keys, value)
   }
 
-  deepAssignAttributes(ref: {}) {
+  mergeAttributes(ref: {}) {
     let w = this.writer()
     if (w) {
       let a = w.attributes
-      deepAssignAttributes(w, a, ref)
+      mergeAttributes(w, a, ref)
     }
     return this.attributes
   }
@@ -401,13 +529,12 @@ class WindowManagerImpl implements WindowManager {
 
   get cameraState(): CameraState {
     const { width = 1280, height = 720 } = this.telebox._containerRect$.value
-    if (this.freedom) {
-      const { centerX = 0, centerY = 0, scale = 1 } = this.mainView.camera
-      return { centerX, centerY, scale: scale / this.localScaleFactor, width, height }
-    } else {
-      const { centerX = 0, centerY = 0, scale = 1 } = this.attributes['camera'] || {}
-      return { centerX, centerY, scale, width, height }
-    }
+    const { centerX = 0, centerY = 0, scale = 1 } = this.mainView.camera
+    return { centerX, centerY, scale: scale / this.localScaleFactor, width, height }
+  }
+
+  get boxState(): TeleBoxState {
+    return this.telebox.state
   }
 
   // `state.scale * localScaleFactor` = `mainView.camera.scale`.
@@ -434,12 +561,14 @@ class WindowManagerImpl implements WindowManager {
   moveCamera(camera: Partial<Camera> & { readonly animationMode?: AnimationMode }) {
     const { centerX, centerY, scale } = this.cameraState
     let id = ~this.options.room.observerId // ~x = -x - 1
-    if (camera.animationMode === AnimationMode.Immediately) {
+    if (camera.animationMode === AnimationMode.Immediately || this.freedom) {
       id = this.options.room.observerId
       const scale = (camera.scale || this.cameraState.scale) * this.localScaleFactor
-      this.mainView.moveCamera({ ...camera, scale, animationMode: AnimationMode.Immediately })
+      this.mainView.moveCamera({ ...camera, scale })
     }
-    this.setAttributes({ camera: { centerX, centerY, scale, ...camera, id, animationMode: void 0 } })
+    if (!this.freedom) {
+      this.setAttributes({ camera: { centerX, centerY, scale, ...camera, id, animationMode: void 0 } })
+    }
   }
 
   moveCameraToContain(rectangle: Rectangle & { readonly animationMode?: AnimationMode }) {
@@ -450,7 +579,7 @@ class WindowManagerImpl implements WindowManager {
     this.moveCamera({ centerX, centerY, scale, animationMode: rectangle.animationMode })
   }
 
-  get pageState(): { index: number, length: number } {
+  get pageState(): PageState {
     return this.pageState$.value
   }
 
@@ -493,11 +622,50 @@ class WindowManagerImpl implements WindowManager {
     }
   }
 
+  dispatchEvent(event: string, payload: unknown) {
+    if (isRoomWritable(this.displayer)) {
+      this.displayer.dispatchMagixEvent(event, payload)
+    }
+  }
+
+  addEventListener(event: string, callback: (event: Event) => void, options?: MagixEventListenerOptions): () => void {
+    this.displayer.addMagixEventListener(event, callback, options)
+    return () => this.displayer.removeMagixEventListener(event, callback)
+  }
+
+  async nextFrame(): Promise<void> {
+    if (isRoomWritable(this.displayer)) {
+      const event = 'next-frame:' + this.displayer.uid + ',' + Math.random().toString(36).slice(2)
+      return new Promise<void>((resolve) => {
+        const dispose = this.addEventListener(event, () => { dispose(); resolve() }, { fireSelfEventAfterCommit: true })
+        this.dispatchEvent(event, null)
+      })
+    }
+  }
+
+  addApp(options: AddAppOptions): string | undefined {
+    if (this.canOperate) {
+      const { kind, src, name, title, state } = options
+      if (src) {
+        this.mergeAttributes({ registry: {} })
+        this.updateAttributes(['registry', kind], { src, name })
+      }
+
+      const id = nextAppId(new Set(Object.keys(this.attributes[kStorage])), kind)
+      this.mergeAttributes({ [kStorage]: {} })
+      this.updateAttributes([kStorage, id], state)
+
+      this.apps.set(id, new App(this, kind, id, true, title || id, state))
+
+      return id
+    }
+  }
+
   c(name: string) {
     return this.namespace + '-' + name
   }
 }
 
-export const createWindowManager = (a: WindowManagerOptions | ReadonlyVal<InvisiblePlugin<{}, {}>>): WindowManager => {
+export function createWindowManager(a: WindowManagerOptions | ReadonlyVal<InvisiblePlugin<{}, {}>>): WindowManager {
   return new WindowManagerImpl('plugin$' in a ? a : { room: a.value.displayer, plugin$: a })
 }

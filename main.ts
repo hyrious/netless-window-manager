@@ -34,10 +34,9 @@ document.querySelector('#whiteboard')?.appendChild(manager.dom)
 
 function debug() {
   let el = document.querySelector('#debug')!
-
-  setInterval(() => {
-    el.textContent = JSON.stringify(manager.pageState, null, 2) + ' ' + JSON.stringify(manager.attributes, null, 2)
-  }, 1000)
+  manager.events.onAny(() => {
+    el.textContent = JSON.stringify(manager.pageState, null, 2) + ' ' + JSON.stringify(manager.cameraState, null, 2)
+  })
 }
 
 debug()

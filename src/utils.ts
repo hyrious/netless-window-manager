@@ -50,10 +50,18 @@ const isArray = (a: any): a is any[] => {
 }
 
 // Arrays must be replaced, since the SDK does not support partially update an array.
-export const deepAssignAttributes = (w: InvisiblePlugin<{}, {}>, a: {}, b: {}, p: string[] = []) => {
+export const mergeAttributes = (w: InvisiblePlugin<{}, {}>, a: {}, b: {}, p: string[] = []) => {
   if (typeof a !== typeof b || (typeof a !== 'object' && a !== b) || Array.isArray(b) || isArray(a)) {
     w.updateAttributes(p, b)
   } else for (let k of Object.keys(b)) {
-    deepAssignAttributes(w, a[k], b[k], [...p, k])
+    mergeAttributes(w, a[k], b[k], [...p, k])
   }
+}
+
+export const nextAppId = (exist: Set<string>, kind: string): string => {
+  let id: string
+  do {
+    id = kind + '-' + Math.random().toString(36).slice(2)
+  } while (exist.has(id))
+  return id
 }

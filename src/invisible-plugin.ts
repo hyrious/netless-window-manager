@@ -36,6 +36,10 @@ export function listenRoom<K extends keyof RoomCallbacks>(room: Room, event: K, 
   return () => room.callbacks.off(event, callback)
 }
 
+/// ```js
+/// const dispose = listenPlayer(player, 'event', callback)
+/// onExit: dispose()
+/// ```
 export function listenPlayer<K extends keyof PlayerCallbacks>(player: Player, event: K, callback: PlayerCallbacks[K]) {
   player.callbacks.on(event, callback)
   return () => player.callbacks.off(event, callback)
@@ -52,10 +56,10 @@ export function listenView<K extends keyof ViewCallbacks>(room: Displayer, view:
 
 /// ```js
 /// const a = useInvisiblePlugin("WindowManager")
-/// await room.joinRoom({ invisiblePlugins: [a.class] })
-/// const plugin$ = a.initialize(room)
-/// console.log(JSON.stringify(plugin$.value.attributes))
-/// onExit: a.dispose()
+/// await room.joinRoom({ invisiblePlugins: [a.class] })  // register plugin class
+/// const plugin$ = a.initialize(room)                    // initialize plugin instance
+/// console.log(JSON.stringify(plugin$.value.attributes)) // get syncted state
+/// onExit: a.dispose()                                   // dispose everything
 /// ```
 export const useInvisiblePlugin = <Kind extends string>(kind: Kind) => {
   const map = reactiveMap<Displayer, InvisiblePlugin<{}, {}>>()

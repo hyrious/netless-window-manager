@@ -90,5 +90,6 @@ App 上可以创建白板，可以自由控制白板的视角。这件事可以�
 可以接入 `@netless/synced-store` 实现。
 
 ```js
-attributes[appId:namespace] = new Refine()
+attributes[kStorage][appId] = new Refine()
+attributes[kStorage][appId:namespace] = new Refine()
 ```

@@ -53,6 +53,95 @@ let manager = createWindowManager({
 manager.setReadonly(true)
 ```
 
+### 获取主白板变更事件
+
+```js
+manager.events.on('cameraStateChange', (camera) => console.info('视角变更', camera))
+manager.events.on('pageStateChange', (state) => console.info('场景变更', state))
+```
+
+### 注册 Netless App
+
+可以直接注册 App 定义，或者一个 `Promise`，或者一个函数，或者一个远程脚本地址。对于函数和地址形式的 App，只有第一次打开该 App 时会执行和下载 App 定义。
+
+> [!WARNING]
+> 通过远程地址加载的方式实质上允许了 XSS 攻击，请通过 CSP 或其他方式确保该脚本可信。
+
+```js
+import { register } from '@netless/window-manager'
+
+register({
+  kind: 'Counter',
+  setup(context) { ... }
+})
+
+register(() => import('./counter'))
+
+register({
+  kind: 'Counter',
+  src: 'url/to/counter.js'
+})
+```
+
+### 插入 Netless App
+
+你可以在这里通过 `src` 或者 `setup` 顺便注册 App 定义，但是请注意如果远端此时还没有注册那么无法打开该 App。如果是通过 `src` 注册的那么会自动在远端注册。
+
+```js
+manager.addApp({
+  kind: 'Counter',
+  src: 'url/to/counter.js',
+  state: { count: 42 },
+})
+```
+
+App 内可以通过 `context.isAddApp` 和 `context.state` 获取初始化参数。
+
+### NetlessApp 内常用接口
+
+```js
+const Counter = {
+  kind: 'Counter',
+  setup(context) {
+    // 是当前用户插入的 App，可以在单个客户端执行一些初始化操作
+    context.isAddApp
+    context.state // { count: 42 }
+    context.now // 约等于服务端的 Date.now()
+
+    // 修改 state，不要直接改 state 对象
+    context.setState({ count: 100 })
+
+    // 监听 state 变化
+    context.on('stateChanged', () => console.log(context.state.count))
+
+    // 发送广播消息，其他客户端里相同 App 会收到此消息，本地不会收到
+    context.dispatchEvent("event", { id: 42 })
+    context.addEventListener("event", ({ payload }) => console.log(payload.id))
+
+    // 连接一个新的 storage
+    const storage = context.connectStorage('counter', { count: 0 })
+    storage.state // { count: 0 }
+    storage.setState({ count: 1 })
+    storage.on('stateChanged', () => console.log(storage.state.count))
+
+    // 用 `connectStorage()` 时传入的默认数据覆盖当前数据
+    storage.resetState()
+
+    // 发送广播消息，其他客户端里相同 App 的同名 storage 会收到此消息
+    storage.dispatchEvent("event", { id: 42 })
+    storage.addEventListener("event", ({ payload }) => console.log(payload.id))
+
+    // UI 相关
+    context.box.mountStyles(document.createElement('style'))
+    context.box.mountContent(document.createElement('div'))
+    context.box.mountFooter(document.createElement('div'))
+
+    // 关闭窗口时的处理
+    context.on('close', () => console.log('exit'))
+  }
+}
+```
+
 ## 开源协议
 
 MIT @ [netless](https://github.com/netless-io)
